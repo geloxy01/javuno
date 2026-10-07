@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-800 antialiased dark:bg-slate-900 dark:text-slate-100;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-javuno px-4 py-2.5 text-sm font-semibold text-white shadow-soft transition
+      hover:bg-javuno-dark focus:outline-none focus:ring-2 focus:ring-javuno focus:ring-offset-2
+      disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition
+      hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-javuno focus:ring-offset-2
+      disabled:cursor-not-allowed disabled:opacity-60
+      dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700;
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm outline-none transition
+      placeholder:text-slate-400 focus:border-javuno focus:ring-2 focus:ring-javuno/30
+      dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100;
+  }
+}

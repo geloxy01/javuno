@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function boardData(boardId) {
+      return get(/databases/$(database)/documents/boards/$(boardId)).data;
+    }
+
+    function isMember(boardId) {
+      return signedIn() && request.auth.uid in boardData(boardId).memberIds;
+    }
+
+    // Users: any signed-in user can read (needed later to add members by email),
+    // but you can only create/edit your own document.
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // Boards
+    match /boards/{boardId} {
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.auth.uid in request.resource.data.memberIds;
+
+      allow read: if signedIn()
+        && request.auth.uid in resource.data.memberIds;
+
+      // Members can update the board, but the owner can never change
+      // and must always stay in memberIds.
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.memberIds
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.ownerId in request.resource.data.memberIds;
+
+      // Only the owner can delete the board.
+      allow delete: if signedIn()
+        && resource.data.ownerId == request.auth.uid;
+
+      // Subcollections: members only.
+      match /lists/{docId} {
+        allow read, write: if isMember(boardId);
+      }
+      match /cards/{docId} {
+        allow read, write: if isMember(boardId);
+      }
+      match /labels/{docId} {
+        allow read, write: if isMember(boardId);
+      }
+      match /comments/{docId} {
+        allow read, write: if isMember(boardId);
+      }
+      match /activity/{docId} {
+        allow read, write: if isMember(boardId);
+      }
+    }
+  }
+}
