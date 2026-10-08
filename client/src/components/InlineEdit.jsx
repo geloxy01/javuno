@@ -45,6 +45,7 @@ export default function InlineEdit({
     if (e.key === "Enter") {
       e.currentTarget.blur(); // blur triggers commit()
     } else if (e.key === "Escape") {
+      e.preventDefault(); // marks this Esc as handled so an open modal does not close
       cancelled.current = true;
       e.currentTarget.blur();
     }

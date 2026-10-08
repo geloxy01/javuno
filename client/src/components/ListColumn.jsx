@@ -13,10 +13,12 @@ const ListColumn = forwardRef(function ListColumn(
   {
     list,
     cards,
+    labelsById,
     onRename,
     onAddCard,
     onCopy,
     onArchive,
+    onOpenCard,
     style,
     handleRef,
     handleProps,
@@ -92,14 +94,21 @@ const ListColumn = forwardRef(function ListColumn(
         className={`min-h-[2.5rem] min-h-0 flex-1 space-y-2 overflow-y-auto px-2 pb-1 pt-1 ${hide}`}
       >
         {isOverlay ? (
-          cards.map((card) => <CardItem key={card.id} card={card} />)
+          cards.map((card) => (
+            <CardItem key={card.id} card={card} labelsById={labelsById} />
+          ))
         ) : (
           <SortableContext
             items={cardIds}
             strategy={verticalListSortingStrategy}
           >
             {cards.map((card) => (
-              <SortableCard key={card.id} card={card} />
+              <SortableCard
+                key={card.id}
+                card={card}
+                labelsById={labelsById}
+                onClick={() => onOpenCard?.(card)}
+              />
             ))}
           </SortableContext>
         )}

@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import CardItem from "./CardItem";
 
-export default function SortableCard({ card, onClick }) {
+export default function SortableCard({ card, labelsById, onClick }) {
   const {
     attributes,
     listeners,
@@ -24,9 +24,13 @@ export default function SortableCard({ card, onClick }) {
     <CardItem
       ref={setNodeRef}
       card={card}
+      labelsById={labelsById}
       style={style}
       isPlaceholder={isDragging}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onClick?.();
+      }}
       {...attributes}
       {...listeners}
     />

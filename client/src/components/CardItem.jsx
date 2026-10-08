@@ -1,29 +1,6 @@
 import { forwardRef } from "react";
 import { CheckSquareIcon, ClockIcon, CommentIcon } from "./icons";
-
-const DUE_TONES = {
-  normal: "text-slate-600 bg-slate-100 dark:bg-slate-600 dark:text-slate-100",
-  soon: "bg-amber-100 text-amber-800",
-  overdue: "bg-red-100 text-red-700",
-  done: "bg-emerald-100 text-emerald-700",
-};
-
-function getDue(card) {
-  const date = card.dueDate?.toDate ? card.dueDate.toDate() : null;
-  if (!date) return null;
-  const diff = date.getTime() - Date.now();
-  let tone = "normal";
-  if (card.dueComplete) tone = "done";
-  else if (diff < 0) tone = "overdue";
-  else if (diff < 24 * 60 * 60 * 1000) tone = "soon";
-  return {
-    tone,
-    label: date.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    }),
-  };
-}
+import { DUE_TONES, getDueInfo } from "../lib/dates";
 
 function getChecklistProgress(card) {
   let total = 0;
@@ -38,12 +15,23 @@ function getChecklistProgress(card) {
 }
 
 const CardItem = forwardRef(function CardItem(
-  { card, isOverlay = false, isPlaceholder = false, onClick, style, ...rest },
+  {
+    card,
+    labelsById = {},
+    isOverlay = false,
+    isPlaceholder = false,
+    onClick,
+    style,
+    ...rest
+  },
   ref,
 ) {
-  const due = getDue(card);
+  const due = getDueInfo(card);
   const { total, done } = getChecklistProgress(card);
   const comments = card.commentCount || 0;
+  const labels = (card.labelIds || [])
+    .map((id) => labelsById[id])
+    .filter(Boolean);
   const hasBadges = Boolean(due) || total > 0 || comments > 0;
 
   let surface;
@@ -54,7 +42,7 @@ const CardItem = forwardRef(function CardItem(
       "drag-pickup cursor-grabbing bg-white shadow-2xl ring-1 ring-javuno/60 dark:bg-slate-700";
   } else {
     surface =
-      "cursor-grab bg-white shadow-sm ring-1 ring-black/5 transition hover:-translate-y-px hover:shadow-md hover:ring-javuno/40 active:cursor-grabbing dark:bg-slate-700 dark:ring-white/10";
+      "cursor-pointer bg-white shadow-sm ring-1 ring-black/5 transition hover:-translate-y-px hover:shadow-md hover:ring-javuno/40 dark:bg-slate-700 dark:ring-white/10";
   }
 
   return (
@@ -67,9 +55,22 @@ const CardItem = forwardRef(function CardItem(
     >
       <div className={isPlaceholder ? "invisible" : ""}>
         {card.coverColor && (
-          <div className="h-2" style={{ background: card.coverColor }} />
+          <div className="h-9" style={{ background: card.coverColor }} />
         )}
         <div className="px-3 py-2.5">
+          {labels.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-1">
+              {labels.map((label) => (
+                <span
+                  key={label.id}
+                  title={label.name || undefined}
+                  style={{ background: label.color }}
+                  className="h-2 w-9 rounded-full"
+                />
+              ))}
+            </div>
+          )}
+
           <p className="break-words text-sm text-slate-800 dark:text-slate-100">
             {card.title}
           </p>
@@ -81,7 +82,7 @@ const CardItem = forwardRef(function CardItem(
                   className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 ${DUE_TONES[due.tone]}`}
                 >
                   <ClockIcon />
-                  {due.label}
+                  {due.shortLabel}
                 </span>
               )}
               {total > 0 && (

@@ -1,13 +1,19 @@
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
+  getDocs,
   onSnapshot,
+  query,
   serverTimestamp,
   updateDoc,
+  where,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { commitUpdates } from "./batch";
+import { logActivity } from "./activity";
 
 const cardsCol = (boardId) => collection(db, "boards", boardId, "cards");
 const cardRef = (boardId, cardId) =>
@@ -28,7 +34,14 @@ export function subscribeToCards(boardId, onData, onError) {
   );
 }
 
-export function createCard(boardId, user, listId, title, position) {
+export function createCard(
+  boardId,
+  user,
+  listId,
+  title,
+  position,
+  listName = "",
+) {
   return addDoc(cardsCol(boardId), {
     listId,
     title,
@@ -45,7 +58,42 @@ export function createCard(boardId, user, listId, title, position) {
     createdBy: user.uid,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
+  }).then((ref) => {
+    logActivity(boardId, user, {
+      type: "card_created",
+      cardId: ref.id,
+      data: { title, listName },
+    });
+    return ref;
   });
+}
+
+// Any field change from the card modal. `patch` may contain arrayUnion / arrayRemove / null values.
+export function updateCard(boardId, cardId, patch) {
+  return updateDoc(cardRef(boardId, cardId), {
+    ...patch,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+// Deletes the card and everything that belongs to it.
+export async function deleteCard(boardId, cardId) {
+  const refs = [];
+  for (const name of ["comments", "activity"]) {
+    const snap = await getDocs(
+      query(
+        collection(db, "boards", boardId, name),
+        where("cardId", "==", cardId),
+      ),
+    );
+    snap.docs.forEach((d) => refs.push(d.ref));
+  }
+  for (let i = 0; i < refs.length; i += 400) {
+    const batch = writeBatch(db);
+    refs.slice(i, i + 400).forEach((ref) => batch.delete(ref));
+    await batch.commit();
+  }
+  await deleteDoc(cardRef(boardId, cardId));
 }
 
 // Drag and drop: moving a card is one update of listId + position.

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   DndContext,
   DragOverlay,
@@ -20,6 +20,7 @@ import {
 import AddListComposer from "../components/AddListComposer";
 import BoardSkeleton from "../components/BoardSkeleton";
 import CardItem from "../components/CardItem";
+import CardModal from "../components/CardModal";
 import InlineEdit from "../components/InlineEdit";
 import ListColumn from "../components/ListColumn";
 import Navbar from "../components/Navbar";
@@ -27,6 +28,7 @@ import SortableList from "../components/SortableList";
 import { ArrowLeftIcon, StarIcon } from "../components/icons";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
+import { logActivity } from "../lib/activity";
 import {
   DEFAULT_BACKGROUND,
   backgroundStyle,
@@ -41,6 +43,7 @@ import {
   subscribeToCards,
 } from "../lib/cards";
 import { SmartMouseSensor, SmartTouchSensor } from "../lib/dndSensors";
+import { subscribeToLabels } from "../lib/labels";
 import {
   archiveList,
   copyList,
@@ -58,7 +61,13 @@ function withMove(item, moves) {
 }
 
 export default function BoardPage() {
-  const { boardId } = useParams();
+  const params = useParams();
+  const boardId = params.boardId;
+  // The splat looks like "c/<cardId>" when a card is open, and is empty otherwise.
+  const openCardId = (params["*"] || "").match(/^c\/([^/]+)/)?.[1] ?? null;
+
+  const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const { showError, showSuccess } = useToast();
 
@@ -66,6 +75,7 @@ export default function BoardPage() {
   const [boardStatus, setBoardStatus] = useState("loading"); // 'loading' | 'ready' | 'denied'
   const [localLists, setLocalLists] = useState([]); // what is rendered (server data + pending moves + live drag)
   const [localCards, setLocalCards] = useState([]);
+  const [labels, setLabels] = useState([]);
   const [listsReady, setListsReady] = useState(false);
   const [cardsReady, setCardsReady] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -105,7 +115,7 @@ export default function BoardPage() {
     );
   }, []);
 
-  // Real-time subscriptions for the board, its lists and its cards.
+  // Real-time subscriptions for the board, its lists, its cards and its labels.
   useEffect(() => {
     serverRef.current = { lists: [], cards: [] };
     overlayRef.current = { lists: new Map(), cards: new Map() };
@@ -114,6 +124,7 @@ export default function BoardPage() {
     setBoardStatus("loading");
     setLocalLists([]);
     setLocalCards([]);
+    setLabels([]);
     setListsReady(false);
     setCardsReady(false);
     setLoadFailed(false);
@@ -159,6 +170,9 @@ export default function BoardPage() {
           showError("Could not load the cards.", err);
         },
       ),
+      subscribeToLabels(boardId, setLabels, (err) =>
+        console.error("Could not load labels", err),
+      ),
     ];
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -190,10 +204,27 @@ export default function BoardPage() {
     return map;
   }, [localCards]);
 
+  const labelsById = useMemo(
+    () => Object.fromEntries(labels.map((l) => [l.id, l])),
+    [labels],
+  );
   const listIds = useMemo(() => localLists.map((l) => l.id), [localLists]);
 
   const isStarred = Boolean(board?.starredBy?.includes(user.uid));
   const members = board?.members ? Object.entries(board.members) : [];
+
+  // ----- Card modal navigation -----
+
+  const openCard = useCallback(
+    (card) => navigate(`/b/${boardId}/c/${card.id}`),
+    [navigate, boardId],
+  );
+
+  // If the modal was opened from the board, go back in history. If the page was opened on the card link, replace it.
+  const closeCard = useCallback(() => {
+    if (location.key !== "default") navigate(-1);
+    else navigate(`/b/${boardId}`, { replace: true });
+  }, [location.key, navigate, boardId]);
 
   // ----- Drag and drop -----
 
@@ -367,11 +398,18 @@ export default function BoardPage() {
       patch: { listId: card.listId, position: u.position },
     }));
 
+    // Moving between lists is worth an activity entry (only written once the move succeeded).
+    const changedList = originRef.current && originRef.current !== card.listId;
+    const fromName = listsRef.current.find(
+      (l) => l.id === originRef.current,
+    )?.title;
+    const toName = listsRef.current.find((l) => l.id === card.listId)?.title;
+
     persistMoves(
       "cards",
       patches,
-      () =>
-        plan.rebalanced
+      () => {
+        const request = plan.rebalanced
           ? rebalanceCards(
               boardId,
               plan.updates.map((u) => ({
@@ -380,7 +418,17 @@ export default function BoardPage() {
                 position: u.position,
               })),
             )
-          : moveCard(boardId, card.id, card.listId, plan.updates[0].position),
+          : moveCard(boardId, card.id, card.listId, plan.updates[0].position);
+        return changedList
+          ? request.then(() =>
+              logActivity(boardId, user, {
+                type: "card_moved",
+                cardId: card.id,
+                data: { from: fromName, to: toName },
+              }),
+            )
+          : request;
+      },
       "Could not move the card. It was put back.",
     );
   }
@@ -457,6 +505,7 @@ export default function BoardPage() {
       list.id,
       title,
       nextPosition(cardsByList[list.id] || []),
+      list.title,
     ).catch((err) => showError("Could not add the card.", err));
   }
 
@@ -488,6 +537,9 @@ export default function BoardPage() {
     active?.type === "card" ? localCards.find((c) => c.id === active.id) : null;
   const activeList =
     active?.type === "list" ? localLists.find((l) => l.id === active.id) : null;
+  const openCardData = openCardId
+    ? (localCards.find((c) => c.id === openCardId) ?? null)
+    : null;
 
   return (
     <div className="flex h-full flex-col" style={style}>
@@ -622,10 +674,12 @@ export default function BoardPage() {
                     key={list.id}
                     list={list}
                     cards={cardsByList[list.id] || []}
+                    labelsById={labelsById}
                     onRename={handleRenameList}
                     onAddCard={handleAddCard}
                     onCopy={handleCopyList}
                     onArchive={handleArchiveList}
+                    onOpenCard={openCard}
                   />
                 ))}
               </SortableContext>
@@ -642,11 +696,16 @@ export default function BoardPage() {
                 }}
               >
                 {activeCard ? (
-                  <CardItem card={activeCard} isOverlay />
+                  <CardItem
+                    card={activeCard}
+                    labelsById={labelsById}
+                    isOverlay
+                  />
                 ) : activeList ? (
                   <ListColumn
                     list={activeList}
                     cards={cardsByList[activeList.id] || []}
+                    labelsById={labelsById}
                     isOverlay
                   />
                 ) : null}
@@ -656,6 +715,17 @@ export default function BoardPage() {
           </DndContext>
         )}
       </div>
+
+      {/* Card detail modal: /b/:boardId/c/:cardId */}
+      {openCardId && !loading && !loadFailed && (
+        <CardModal
+          boardId={boardId}
+          card={openCardData}
+          lists={localLists}
+          labels={labels}
+          onClose={closeCard}
+        />
+      )}
     </div>
   );
 }

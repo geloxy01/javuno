@@ -16,8 +16,9 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+      {/* Matches /b/:boardId and /b/:boardId/c/:cardId without remounting the board */}
       <Route
-        path="/b/:boardId"
+        path="/b/:boardId/*"
         element={
           <ProtectedRoute>
             <BoardPage />
