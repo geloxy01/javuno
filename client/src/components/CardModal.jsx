@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Timestamp, arrayRemove, arrayUnion } from "firebase/firestore";
+import Avatar from "./Avatar";
 import CardActivity from "./CardActivity";
+import { CardMembersPopover } from "./CardMembersPopover";
 import Checklists from "./Checklists";
 import DescriptionEditor from "./DescriptionEditor";
-import Popover, { SIDEBAR_BUTTON } from "./Popover";
+import { SIDEBAR_BUTTON } from "./Popover";
 import {
   ChecklistPopover,
   CoverPopover,
@@ -84,7 +86,14 @@ function TitleField({ value, onSave }) {
   );
 }
 
-export default function CardModal({ boardId, card, lists, labels, onClose }) {
+export default function CardModal({
+  boardId,
+  card,
+  lists,
+  labels,
+  members,
+  onClose,
+}) {
   const { user } = useAuth();
   const { showError, showSuccess } = useToast();
 
@@ -133,8 +142,12 @@ export default function CardModal({ boardId, card, lists, labels, onClose }) {
   const list = lists.find((l) => l.id === card.listId);
   const due = getDueInfo(card);
   const labelsById = Object.fromEntries(labels.map((l) => [l.id, l]));
+  const membersById = Object.fromEntries(members.map((m) => [m.uid, m]));
   const cardLabels = (card.labelIds || [])
     .map((id) => labelsById[id])
+    .filter(Boolean);
+  const assignedMembers = (card.memberIds || [])
+    .map((id) => membersById[id])
     .filter(Boolean);
   const checklists = card.checklists || [];
 
@@ -166,6 +179,19 @@ export default function CardModal({ boardId, card, lists, labels, onClose }) {
       "Could not update the labels.",
       () =>
         act(assigned ? "label_removed" : "label_added", { name: label.name }),
+    );
+  }
+
+  function handleToggleMember(person, assigned) {
+    save(
+      {
+        memberIds: assigned ? arrayRemove(person.uid) : arrayUnion(person.uid),
+      },
+      "Could not update the members.",
+      () =>
+        act(assigned ? "member_removed" : "member_added", {
+          name: person.displayName,
+        }),
     );
   }
 
@@ -282,8 +308,30 @@ export default function CardModal({ boardId, card, lists, labels, onClose }) {
           <div className="mt-6 grid gap-6 md:grid-cols-[minmax(0,1fr)_12rem]">
             {/* ---------- Left: content ---------- */}
             <div className="min-w-0 space-y-6">
-              {(cardLabels.length > 0 || due) && (
+              {(assignedMembers.length > 0 || cardLabels.length > 0 || due) && (
                 <div className="flex flex-wrap gap-x-8 gap-y-4">
+                  {assignedMembers.length > 0 && (
+                    <section>
+                      <h3 className={sectionHeading}>Members</h3>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {assignedMembers.map((m) => (
+                          <span
+                            key={m.uid}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-200/80 py-0.5 pl-0.5 pr-2.5 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-100"
+                          >
+                            <Avatar
+                              name={m.displayName}
+                              photoURL={m.photoURL}
+                              className="h-6 w-6"
+                              textClass="text-[10px]"
+                            />
+                            {m.displayName}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
                   {cardLabels.length > 0 && (
                     <section>
                       <h3 className={sectionHeading}>Labels</h3>
@@ -359,6 +407,11 @@ export default function CardModal({ boardId, card, lists, labels, onClose }) {
             {/* ---------- Right: actions ---------- */}
             <aside className="order-first space-y-2 md:order-none">
               <h3 className={sidebarHeading}>Add to card</h3>
+              <CardMembersPopover
+                members={members}
+                card={card}
+                onToggle={handleToggleMember}
+              />
               <LabelsPopover
                 boardId={boardId}
                 labels={labels}

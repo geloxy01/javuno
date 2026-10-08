@@ -2,6 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ---------- helpers ----------
     function signedIn() {
       return request.auth != null;
     }
@@ -14,49 +15,120 @@ service cloud.firestore {
       return signedIn() && request.auth.uid in boardData(boardId).memberIds;
     }
 
-    // Users: any signed-in user can read (needed later to add members by email),
-    // but you can only create/edit your own document.
+    function isOwner(boardId) {
+      return signedIn() && boardData(boardId).ownerId == request.auth.uid;
+    }
+
+    // Top-level fields changed by the current write (update only).
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function cardIsGone(boardId, cardId) {
+      return !exists(/databases/$(database)/documents/boards/$(boardId)/cards/$(cardId));
+    }
+
+    // Anyone newly assigned to a card must be a member of the board.
+    function assigneesOk(boardId, before) {
+      return request.resource.data.get('memberIds', []).toSet()
+        .difference(before.toSet())
+        .difference(boardData(boardId).memberIds.toSet())
+        .size() == 0;
+    }
+
+    // ---------- users ----------
     match /users/{userId} {
-      allow read: if signedIn();
-      allow create, update: if signedIn() && request.auth.uid == userId;
+      // Reading one user is allowed; listing is capped so the collection cannot be dumped.
+      allow get: if signedIn();
+      allow list: if signedIn() && request.query.limit <= 10;
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == userId;
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == resource.data.uid;
       allow delete: if false;
     }
 
-    // Boards
+    // ---------- boards ----------
     match /boards/{boardId} {
+
+      // The owner can change anything except who the owner is.
+      function boardOwnerUpdate() {
+        return resource.data.ownerId == request.auth.uid
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.ownerId in request.resource.data.memberIds;
+      }
+
+      // Other members can only change these fields (not memberIds or members).
+      function boardMemberUpdate() {
+        return changedKeys().hasOnly(['title', 'background', 'starredBy', 'closed', 'updatedAt']);
+      }
+
+      // A non-owner member can remove only themselves.
+      function boardLeave() {
+        return request.auth.uid != resource.data.ownerId
+          && changedKeys().hasOnly(['memberIds', 'members', 'updatedAt'])
+          && request.resource.data.memberIds.toSet()
+             == resource.data.memberIds.toSet().difference([request.auth.uid].toSet());
+      }
+
       allow create: if signedIn()
         && request.resource.data.ownerId == request.auth.uid
-        && request.auth.uid in request.resource.data.memberIds;
+        && request.resource.data.memberIds == [request.auth.uid];
 
       allow read: if signedIn()
         && request.auth.uid in resource.data.memberIds;
 
-      // Members can update the board, but the owner can never change
-      // and must always stay in memberIds.
       allow update: if signedIn()
         && request.auth.uid in resource.data.memberIds
-        && request.resource.data.ownerId == resource.data.ownerId
-        && request.resource.data.ownerId in request.resource.data.memberIds;
+        && (boardOwnerUpdate() || boardMemberUpdate() || boardLeave());
 
-      // Only the owner can delete the board.
       allow delete: if signedIn()
         && resource.data.ownerId == request.auth.uid;
 
-      // Subcollections: members only.
-      match /lists/{docId} {
+      // ---------- subcollections: members only ----------
+      match /lists/{listId} {
         allow read, write: if isMember(boardId);
       }
-      match /cards/{docId} {
+
+      match /labels/{labelId} {
         allow read, write: if isMember(boardId);
       }
-      match /labels/{docId} {
-        allow read, write: if isMember(boardId);
+
+      match /cards/{cardId} {
+        allow read: if isMember(boardId);
+        allow create: if isMember(boardId)
+          && request.resource.data.createdBy == request.auth.uid
+          && assigneesOk(boardId, []);
+        allow update: if isMember(boardId)
+          && assigneesOk(boardId, resource.data.get('memberIds', []));
+        allow delete: if isMember(boardId);
       }
-      match /comments/{docId} {
-        allow read, write: if isMember(boardId);
+
+      match /comments/{commentId} {
+        allow read: if isMember(boardId);
+        allow create: if isMember(boardId)
+          && request.resource.data.authorId == request.auth.uid;
+        // Only the author can edit, and only the text.
+        allow update: if isMember(boardId)
+          && resource.data.authorId == request.auth.uid
+          && changedKeys().hasOnly(['text', 'editedAt']);
+        // The author or the board owner can delete. Anyone can clean up after a deleted card.
+        allow delete: if isMember(boardId)
+          && (resource.data.authorId == request.auth.uid
+              || isOwner(boardId)
+              || cardIsGone(boardId, resource.data.cardId));
       }
-      match /activity/{docId} {
-        allow read, write: if isMember(boardId);
+
+      match /activity/{activityId} {
+        allow read: if isMember(boardId);
+        allow create: if isMember(boardId)
+          && request.resource.data.actorId == request.auth.uid;
+        allow update: if false;
+        allow delete: if isMember(boardId)
+          && (isOwner(boardId)
+              || (resource.data.cardId != null && cardIsGone(boardId, resource.data.cardId)));
       }
     }
   }

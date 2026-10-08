@@ -3,12 +3,15 @@ import {
   arrayRemove,
   arrayUnion,
   collection,
+  deleteDoc,
   doc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
   updateDoc,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -96,9 +99,31 @@ export function renameBoard(boardId, title) {
   });
 }
 
+// background: { type: 'gradient' | 'color' | 'image', value: string }
+export function setBackground(boardId, background) {
+  return updateDoc(doc(db, "boards", boardId), {
+    background,
+    updatedAt: serverTimestamp(),
+  });
+}
+
 // Star or unstar a board for one user. Works on older boards that have no starredBy field yet.
 export function toggleStar(boardId, uid, starred) {
   return updateDoc(doc(db, "boards", boardId), {
     starredBy: starred ? arrayUnion(uid) : arrayRemove(uid),
   });
+}
+
+// Owner only. Firestore does not delete subcollections with their parent,
+// so every document is removed first, then the board itself.
+export async function deleteBoard(boardId) {
+  for (const name of ["cards", "comments", "activity", "labels", "lists"]) {
+    const snap = await getDocs(collection(db, "boards", boardId, name));
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const batch = writeBatch(db);
+      snap.docs.slice(i, i + 400).forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+  await deleteDoc(doc(db, "boards", boardId));
 }

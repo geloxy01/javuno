@@ -14,6 +14,10 @@ const ListColumn = forwardRef(function ListColumn(
     list,
     cards,
     labelsById,
+    membersById,
+    matchIds = null,
+    composeRequest = null,
+    onHoverList,
     onRename,
     onAddCard,
     onCopy,
@@ -29,7 +33,15 @@ const ListColumn = forwardRef(function ListColumn(
 ) {
   const [composing, setComposing] = useState(false);
   const scrollRef = useRef(null);
+  const handledRequest = useRef(composeRequest?.at ?? 0);
   const cardIds = useMemo(() => cards.map((c) => c.id), [cards]);
+
+  // The "n" shortcut asks one list to open its composer.
+  useEffect(() => {
+    if (!composeRequest || composeRequest.at === handledRequest.current) return;
+    handledRequest.current = composeRequest.at;
+    if (composeRequest.listId === list.id) setComposing(true);
+  }, [composeRequest, list.id]);
 
   // Keep the newest card in view while adding cards.
   useEffect(() => {
@@ -48,12 +60,14 @@ const ListColumn = forwardRef(function ListColumn(
     surface = "bg-slate-100/95 shadow-soft dark:bg-slate-800/95";
   }
   const hide = isPlaceholder ? "invisible" : "";
+  const isDimmed = (card) => Boolean(matchIds) && !matchIds.has(card.id);
 
   return (
     <section
       ref={ref}
       style={style}
       aria-label={list.title}
+      onMouseEnter={() => onHoverList?.(list.id)}
       className={`flex max-h-full w-72 shrink-0 flex-col rounded-2xl ${surface}`}
     >
       <header
@@ -95,7 +109,12 @@ const ListColumn = forwardRef(function ListColumn(
       >
         {isOverlay ? (
           cards.map((card) => (
-            <CardItem key={card.id} card={card} labelsById={labelsById} />
+            <CardItem
+              key={card.id}
+              card={card}
+              labelsById={labelsById}
+              membersById={membersById}
+            />
           ))
         ) : (
           <SortableContext
@@ -107,6 +126,8 @@ const ListColumn = forwardRef(function ListColumn(
                 key={card.id}
                 card={card}
                 labelsById={labelsById}
+                membersById={membersById}
+                dimmed={isDimmed(card)}
                 onClick={() => onOpenCard?.(card)}
               />
             ))}

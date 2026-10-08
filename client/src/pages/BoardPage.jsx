@@ -18,21 +18,30 @@ import {
   horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import AddListComposer from "../components/AddListComposer";
+import BackgroundPopover from "../components/BackgroundPicker";
 import BoardSkeleton from "../components/BoardSkeleton";
+import BoardToolbar from "../components/BoardToolbar";
 import CardItem from "../components/CardItem";
 import CardModal from "../components/CardModal";
+import { HEADER_BUTTON } from "../components/HeaderPopover";
 import InlineEdit from "../components/InlineEdit";
 import ListColumn from "../components/ListColumn";
+import MembersPopover from "../components/MembersPanel";
 import Navbar from "../components/Navbar";
+import ShortcutsDialog from "../components/ShortcutsDialog";
 import SortableList from "../components/SortableList";
+import ThemeToggle from "../components/ThemeToggle";
 import { ArrowLeftIcon, StarIcon } from "../components/icons";
+import { HelpIcon } from "../components/uiIcons";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
 import { logActivity } from "../lib/activity";
 import {
   DEFAULT_BACKGROUND,
   backgroundStyle,
+  deleteBoard,
   renameBoard,
+  setBackground,
   subscribeToBoard,
   toggleStar,
 } from "../lib/boards";
@@ -43,6 +52,7 @@ import {
   subscribeToCards,
 } from "../lib/cards";
 import { SmartMouseSensor, SmartTouchSensor } from "../lib/dndSensors";
+import { EMPTY_FILTERS, cardMatches, hasActiveFilter } from "../lib/filters";
 import { subscribeToLabels } from "../lib/labels";
 import {
   archiveList,
@@ -81,7 +91,14 @@ export default function BoardPage() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [active, setActive] = useState(null); // { id, type } while dragging
 
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [composeRequest, setComposeRequest] = useState(null); // { listId, at } set by the "n" shortcut
+
   const scrollerRef = useRef(null);
+  const searchRef = useRef(null);
+  const hoverListRef = useRef(null);
   const serverRef = useRef({ lists: [], cards: [] }); // latest data from Firestore
   const overlayRef = useRef({ lists: new Map(), cards: new Map() }); // moves written but not yet confirmed
   const draggingRef = useRef(false);
@@ -120,6 +137,7 @@ export default function BoardPage() {
     serverRef.current = { lists: [], cards: [] };
     overlayRef.current = { lists: new Map(), cards: new Map() };
     draggingRef.current = false;
+    hoverListRef.current = null;
     setBoard(null);
     setBoardStatus("loading");
     setLocalLists([]);
@@ -129,6 +147,9 @@ export default function BoardPage() {
     setCardsReady(false);
     setLoadFailed(false);
     setActive(null);
+    setQuery("");
+    setFilters(EMPTY_FILTERS);
+    setComposeRequest(null);
 
     const unsubscribers = [
       subscribeToBoard(
@@ -210,8 +231,34 @@ export default function BoardPage() {
   );
   const listIds = useMemo(() => localLists.map((l) => l.id), [localLists]);
 
+  const membersList = useMemo(
+    () =>
+      Object.entries(board?.members || {})
+        .map(([uid, m]) => ({ uid, ...m }))
+        .sort((a, b) =>
+          (a.displayName || "").localeCompare(b.displayName || ""),
+        ),
+    [board?.members],
+  );
+  const membersById = useMemo(
+    () => Object.fromEntries(membersList.map((m) => [m.uid, m])),
+    [membersList],
+  );
+
+  // Search and filters: the ids of cards that match, or null when nothing is filtered.
+  const filterActive = hasActiveFilter(query, filters);
+  const matchIds = useMemo(() => {
+    if (!filterActive) return null;
+    return new Set(
+      localCards
+        .filter((card) =>
+          cardMatches(card, query, filters, labelsById, membersById),
+        )
+        .map((card) => card.id),
+    );
+  }, [filterActive, localCards, query, filters, labelsById, membersById]);
+
   const isStarred = Boolean(board?.starredBy?.includes(user.uid));
-  const members = board?.members ? Object.entries(board.members) : [];
 
   // ----- Card modal navigation -----
 
@@ -225,6 +272,56 @@ export default function BoardPage() {
     if (location.key !== "default") navigate(-1);
     else navigate(`/b/${boardId}`, { replace: true });
   }, [location.key, navigate, boardId]);
+
+  // ----- Keyboard shortcuts: n, /, ? (Esc is handled by each dialog) -----
+
+  const handleHoverList = useCallback((listId) => {
+    hoverListRef.current = listId;
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const el = e.target;
+      const tag = el?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        el?.isContentEditable
+      )
+        return;
+
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelpOpen((open) => !open);
+        return;
+      }
+
+      // The other shortcuts work on the board itself, not behind an open card or dialog.
+      if (openCardId || helpOpen) return;
+
+      if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      } else if (e.key === "n" || e.key === "N") {
+        const lists = listsRef.current;
+        if (lists.length === 0) {
+          showError("Add a list first, then press n to add a card.");
+          return;
+        }
+        e.preventDefault();
+        const target =
+          lists.find((l) => l.id === hoverListRef.current) || lists[0];
+        setComposeRequest({ listId: target.id, at: Date.now() });
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [openCardId, helpOpen, showError]);
 
   // ----- Drag and drop -----
 
@@ -462,6 +559,30 @@ export default function BoardPage() {
     );
   }
 
+  function handleBackground(background) {
+    setBackground(boardId, background).catch((err) =>
+      showError("Could not change the background.", err),
+    );
+  }
+
+  function handleLeft() {
+    showSuccess("You left the board.");
+    navigate("/", { replace: true });
+  }
+
+  // Go back to the boards page right away; the cleanup continues in the background.
+  function handleDeleteBoard() {
+    navigate("/", { replace: true });
+    deleteBoard(boardId)
+      .then(() => showSuccess("Board deleted."))
+      .catch((err) => showError("Could not delete the board.", err));
+  }
+
+  function clearSearchAndFilters() {
+    setQuery("");
+    setFilters(EMPTY_FILTERS);
+  }
+
   function handleAddList(title) {
     createList(boardId, title, nextPosition(localLists)).catch((err) =>
       showError("Could not add the list.", err),
@@ -544,8 +665,13 @@ export default function BoardPage() {
   return (
     <div className="flex h-full flex-col" style={style}>
       {/* Translucent top bar */}
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 bg-black/25 px-3 text-white backdrop-blur-md sm:px-4">
-        <div className="flex min-w-0 items-center gap-1.5">
+      <header className="relative z-30 flex h-14 shrink-0 items-center justify-between gap-2 px-3 text-white sm:px-4">
+        <div
+          aria-hidden="true"
+          className="absolute inset-0 -z-10 bg-black/25 backdrop-blur-md"
+        />
+
+        <div className="flex min-w-0 flex-1 items-center gap-1">
           <Link
             to="/"
             aria-label="Back to boards"
@@ -563,8 +689,8 @@ export default function BoardPage() {
                   onSave={handleRenameBoard}
                   maxLength={80}
                   label="Board title"
-                  className="block max-w-[50vw] truncate rounded-lg px-2 py-1 text-lg font-bold text-white transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/80"
-                  inputClassName="w-64 max-w-[60vw] rounded-lg bg-white px-2 py-1 text-lg font-bold text-slate-800 outline-none ring-2 ring-javuno"
+                  className="block max-w-[34vw] truncate rounded-lg px-2 py-1 text-lg font-bold text-white transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/80 sm:max-w-xs"
+                  inputClassName="w-48 max-w-[50vw] rounded-lg bg-white px-2 py-1 text-lg font-bold text-slate-800 outline-none ring-2 ring-javuno sm:w-64"
                 />
               </div>
               <button
@@ -585,45 +711,61 @@ export default function BoardPage() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          {members.length > 0 && (
-            <div className="flex -space-x-2">
-              {members.slice(0, 4).map(([uid, m]) =>
-                m.photoURL ? (
-                  <img
-                    key={uid}
-                    src={m.photoURL}
-                    alt={m.displayName}
-                    title={m.displayName}
-                    referrerPolicy="no-referrer"
-                    className="h-8 w-8 rounded-full object-cover ring-2 ring-white/70"
-                  />
-                ) : (
-                  <div
-                    key={uid}
-                    title={m.displayName}
-                    className="flex h-8 w-8 items-center justify-center rounded-full bg-javuno text-xs font-semibold text-white ring-2 ring-white/70"
-                  >
-                    {(m.displayName || "?").charAt(0).toUpperCase()}
-                  </div>
-                ),
-              )}
-            </div>
-          )}
-          <Link
-            to="/"
-            className="hidden items-center gap-2 sm:flex"
-            title="Javuno"
-          >
-            <img
-              src="/logo.png"
-              alt="Javuno"
-              className="h-7 w-7 rounded-lg shadow-soft"
+        {board && (
+          <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+            <MembersPopover
+              boardId={boardId}
+              board={board}
+              user={user}
+              onLeft={handleLeft}
+              onDelete={handleDeleteBoard}
             />
-            <span className="text-sm font-bold tracking-tight">Javuno</span>
-          </Link>
-        </div>
+            <BackgroundPopover
+              background={board.background}
+              onChange={handleBackground}
+            />
+            <ThemeToggle className={HEADER_BUTTON} />
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              aria-label="Keyboard shortcuts"
+              title="Keyboard shortcuts (?)"
+              className={`${HEADER_BUTTON} hidden md:inline-flex`}
+            >
+              <HelpIcon />
+            </button>
+            <Link
+              to="/"
+              className="ml-2 hidden items-center gap-2 lg:flex"
+              title="Javuno"
+            >
+              <img
+                src="/logo.png"
+                alt="Javuno"
+                className="h-7 w-7 rounded-lg shadow-soft"
+              />
+              <span className="text-sm font-bold tracking-tight">Javuno</span>
+            </Link>
+          </div>
+        )}
       </header>
+
+      {/* Search and filters */}
+      {board && (
+        <BoardToolbar
+          searchRef={searchRef}
+          query={query}
+          onQuery={setQuery}
+          filters={filters}
+          onFilters={setFilters}
+          labels={labels}
+          members={membersList}
+          matchCount={matchIds ? matchIds.size : localCards.length}
+          totalCount={localCards.length}
+          active={filterActive}
+          onClear={clearSearchAndFilters}
+        />
+      )}
 
       {/* Horizontally scrolling lists */}
       <div
@@ -675,6 +817,10 @@ export default function BoardPage() {
                     list={list}
                     cards={cardsByList[list.id] || []}
                     labelsById={labelsById}
+                    membersById={membersById}
+                    matchIds={matchIds}
+                    composeRequest={composeRequest}
+                    onHoverList={handleHoverList}
                     onRename={handleRenameList}
                     onAddCard={handleAddCard}
                     onCopy={handleCopyList}
@@ -699,6 +845,7 @@ export default function BoardPage() {
                   <CardItem
                     card={activeCard}
                     labelsById={labelsById}
+                    membersById={membersById}
                     isOverlay
                   />
                 ) : activeList ? (
@@ -706,6 +853,7 @@ export default function BoardPage() {
                     list={activeList}
                     cards={cardsByList[activeList.id] || []}
                     labelsById={labelsById}
+                    membersById={membersById}
                     isOverlay
                   />
                 ) : null}
@@ -723,9 +871,12 @@ export default function BoardPage() {
           card={openCardData}
           lists={localLists}
           labels={labels}
+          members={membersList}
           onClose={closeCard}
         />
       )}
+
+      <ShortcutsDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

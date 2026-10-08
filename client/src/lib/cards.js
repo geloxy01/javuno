@@ -76,24 +76,33 @@ export function updateCard(boardId, cardId, patch) {
   });
 }
 
-// Deletes the card and everything that belongs to it.
+// Deletes the card, then its comments and activity.
+// The card goes first: the security rules let any member remove the leftovers of a card that no longer exists.
 export async function deleteCard(boardId, cardId) {
-  const refs = [];
-  for (const name of ["comments", "activity"]) {
-    const snap = await getDocs(
-      query(
-        collection(db, "boards", boardId, name),
-        where("cardId", "==", cardId),
-      ),
-    );
-    snap.docs.forEach((d) => refs.push(d.ref));
-  }
-  for (let i = 0; i < refs.length; i += 400) {
-    const batch = writeBatch(db);
-    refs.slice(i, i + 400).forEach((ref) => batch.delete(ref));
-    await batch.commit();
-  }
   await deleteDoc(cardRef(boardId, cardId));
+
+  try {
+    const refs = [];
+    for (const name of ["comments", "activity"]) {
+      const snap = await getDocs(
+        query(
+          collection(db, "boards", boardId, name),
+          where("cardId", "==", cardId),
+        ),
+      );
+      snap.docs.forEach((d) => refs.push(d.ref));
+    }
+    for (let i = 0; i < refs.length; i += 400) {
+      const batch = writeBatch(db);
+      refs.slice(i, i + 400).forEach((ref) => batch.delete(ref));
+      await batch.commit();
+    }
+  } catch (err) {
+    console.warn(
+      "The card was deleted, but some of its comments or activity could not be removed.",
+      err,
+    );
+  }
 }
 
 // Drag and drop: moving a card is one update of listId + position.

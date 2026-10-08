@@ -66,6 +66,10 @@ export function describeActivity(entry) {
       return `added the label "${d.name || "unnamed"}"`;
     case "label_removed":
       return `removed the label "${d.name || "unnamed"}"`;
+    case "member_added":
+      return `added ${d.name || "a member"} to this card`;
+    case "member_removed":
+      return `removed ${d.name || "a member"} from this card`;
     case "card_archived":
       return "archived this card";
     default:
