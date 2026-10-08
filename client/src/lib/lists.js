@@ -8,8 +8,11 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
+import { commitUpdates } from "./batch";
 
 const listsCol = (boardId) => collection(db, "boards", boardId, "lists");
+const listRef = (boardId, listId) =>
+  doc(db, "boards", boardId, "lists", listId);
 
 export function subscribeToLists(boardId, onData, onError) {
   return onSnapshot(
@@ -36,17 +39,35 @@ export function createList(boardId, title, position) {
 }
 
 export function renameList(boardId, listId, title) {
-  return updateDoc(doc(db, "boards", boardId, "lists", listId), {
+  return updateDoc(listRef(boardId, listId), {
     title,
     updatedAt: serverTimestamp(),
   });
 }
 
 export function archiveList(boardId, listId) {
-  return updateDoc(doc(db, "boards", boardId, "lists", listId), {
+  return updateDoc(listRef(boardId, listId), {
     archived: true,
     updatedAt: serverTimestamp(),
   });
+}
+
+// Drag and drop: only the moved list is written.
+export function moveList(boardId, listId, position) {
+  return updateDoc(listRef(boardId, listId), {
+    position,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+// Used when gaps get too small. entries: [{ id, position }] for every list, in order.
+export function rebalanceLists(boardId, entries) {
+  return commitUpdates(
+    entries.map(({ id, position }) => [
+      listRef(boardId, id),
+      { position, updatedAt: serverTimestamp() },
+    ]),
+  );
 }
 
 // Copies a list and all of its (non-archived) cards to a new list at `position`.

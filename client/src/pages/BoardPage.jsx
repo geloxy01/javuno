@@ -1,10 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link, useParams } from "react-router-dom";
+import {
+  DndContext,
+  DragOverlay,
+  MeasuringStrategy,
+  closestCenter,
+  getFirstCollision,
+  pointerWithin,
+  rectIntersection,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+} from "@dnd-kit/sortable";
 import AddListComposer from "../components/AddListComposer";
 import BoardSkeleton from "../components/BoardSkeleton";
+import CardItem from "../components/CardItem";
 import InlineEdit from "../components/InlineEdit";
 import ListColumn from "../components/ListColumn";
 import Navbar from "../components/Navbar";
+import SortableList from "../components/SortableList";
 import { ArrowLeftIcon, StarIcon } from "../components/icons";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -15,15 +34,28 @@ import {
   subscribeToBoard,
   toggleStar,
 } from "../lib/boards";
-import { createCard, subscribeToCards } from "../lib/cards";
+import {
+  createCard,
+  moveCard,
+  rebalanceCards,
+  subscribeToCards,
+} from "../lib/cards";
+import { SmartMouseSensor, SmartTouchSensor } from "../lib/dndSensors";
 import {
   archiveList,
   copyList,
   createList,
+  moveList,
+  rebalanceLists,
   renameList,
   subscribeToLists,
 } from "../lib/lists";
-import { nextPosition } from "../lib/position";
+import { nextPosition, planMove, sortByPosition } from "../lib/position";
+
+function withMove(item, moves) {
+  const move = moves.get(item.id);
+  return move ? { ...item, ...move.patch } : item;
+}
 
 export default function BoardPage() {
   const { boardId } = useParams();
@@ -32,22 +64,60 @@ export default function BoardPage() {
 
   const [board, setBoard] = useState(null);
   const [boardStatus, setBoardStatus] = useState("loading"); // 'loading' | 'ready' | 'denied'
-  const [lists, setLists] = useState([]);
-  const [cards, setCards] = useState([]);
+  const [localLists, setLocalLists] = useState([]); // what is rendered (server data + pending moves + live drag)
+  const [localCards, setLocalCards] = useState([]);
   const [listsReady, setListsReady] = useState(false);
   const [cardsReady, setCardsReady] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [active, setActive] = useState(null); // { id, type } while dragging
+
   const scrollerRef = useRef(null);
+  const serverRef = useRef({ lists: [], cards: [] }); // latest data from Firestore
+  const overlayRef = useRef({ lists: new Map(), cards: new Map() }); // moves written but not yet confirmed
+  const draggingRef = useRef(false);
+  const originRef = useRef(null); // list the dragged card started in
+  const lastOverId = useRef(null);
+  const recentlyMovedRef = useRef(false);
+  const listsRef = useRef([]);
+  const cardsRef = useRef([]);
+  listsRef.current = localLists;
+  cardsRef.current = localCards;
+
+  // Mouse needs a 6px move before a drag starts (so clicks still work).
+  // Touch needs a short press, so normal swipes still scroll the board.
+  const sensors = useSensors(
+    useSensor(SmartMouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(SmartTouchSensor, {
+      activationConstraint: { delay: 220, tolerance: 8 },
+    }),
+  );
+
+  // Rebuild the rendered data from Firestore + pending moves. Skipped while dragging.
+  const syncFromServer = useCallback(() => {
+    if (draggingRef.current) return;
+    const { lists: serverLists, cards: serverCards } = serverRef.current;
+    const { lists: listMoves, cards: cardMoves } = overlayRef.current;
+    setLocalLists(
+      sortByPosition(serverLists.map((l) => withMove(l, listMoves))),
+    );
+    setLocalCards(
+      sortByPosition(serverCards.map((c) => withMove(c, cardMoves))),
+    );
+  }, []);
 
   // Real-time subscriptions for the board, its lists and its cards.
   useEffect(() => {
+    serverRef.current = { lists: [], cards: [] };
+    overlayRef.current = { lists: new Map(), cards: new Map() };
+    draggingRef.current = false;
     setBoard(null);
     setBoardStatus("loading");
-    setLists([]);
-    setCards([]);
+    setLocalLists([]);
+    setLocalCards([]);
     setListsReady(false);
     setCardsReady(false);
     setLoadFailed(false);
+    setActive(null);
 
     const unsubscribers = [
       subscribeToBoard(
@@ -64,8 +134,9 @@ export default function BoardPage() {
       subscribeToLists(
         boardId,
         (data) => {
-          setLists(data);
+          serverRef.current.lists = data;
           setListsReady(true);
+          syncFromServer();
         },
         (err) => {
           console.error(err);
@@ -77,8 +148,9 @@ export default function BoardPage() {
       subscribeToCards(
         boardId,
         (data) => {
-          setCards(data);
+          serverRef.current.cards = data;
           setCardsReady(true);
+          syncFromServer();
         },
         (err) => {
           console.error(err);
@@ -90,7 +162,7 @@ export default function BoardPage() {
     ];
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
-  }, [boardId, showError]);
+  }, [boardId, showError, syncFromServer]);
 
   // Tab title follows the board name.
   useEffect(() => {
@@ -100,20 +172,235 @@ export default function BoardPage() {
     };
   }, [board?.title]);
 
-  // Group cards by list (already sorted by position).
+  // After a card moves to another list the layout shifts for a frame; remember that for collision detection.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      recentlyMovedRef.current = false;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [localCards]);
+
+  // Group cards by list. Order inside a list is the array order.
   const cardsByList = useMemo(() => {
     const map = {};
-    cards.forEach((card) => {
+    localCards.forEach((card) => {
       if (!map[card.listId]) map[card.listId] = [];
       map[card.listId].push(card);
     });
     return map;
-  }, [cards]);
+  }, [localCards]);
+
+  const listIds = useMemo(() => localLists.map((l) => l.id), [localLists]);
 
   const isStarred = Boolean(board?.starredBy?.includes(user.uid));
   const members = board?.members ? Object.entries(board.members) : [];
 
-  // ----- Actions -----
+  // ----- Drag and drop -----
+
+  // Lists only collide with lists. Cards collide with the card under the pointer,
+  // or with the list itself when it is empty.
+  const collisionDetection = useCallback((args) => {
+    if (args.active.data.current?.type === "list") {
+      return closestCenter({
+        ...args,
+        droppableContainers: args.droppableContainers.filter(
+          (c) => c.data.current?.type === "list",
+        ),
+      });
+    }
+
+    const pointerHits = pointerWithin(args);
+    const hits = pointerHits.length > 0 ? pointerHits : rectIntersection(args);
+    let overId = getFirstCollision(hits, "id");
+
+    if (overId != null) {
+      const container = args.droppableContainers.find((c) => c.id === overId);
+      if (container?.data.current?.type === "list") {
+        const listCardIds = cardsRef.current
+          .filter((c) => c.listId === overId)
+          .map((c) => c.id);
+        if (listCardIds.length > 0) {
+          const closest = closestCenter({
+            ...args,
+            droppableContainers: args.droppableContainers.filter(
+              (c) => c.id !== overId && listCardIds.includes(c.id),
+            ),
+          });
+          overId = closest[0]?.id ?? overId;
+        }
+      }
+      lastOverId.current = overId;
+      return [{ id: overId }];
+    }
+
+    // Right after a card changes list the layout shifts; keep the last target so items don't jump.
+    if (recentlyMovedRef.current) lastOverId.current = args.active.id;
+    return lastOverId.current ? [{ id: lastOverId.current }] : [];
+  }, []);
+
+  // Show the move on screen right away, write it, and undo it with a toast if the write fails.
+  function persistMoves(kind, patches, write, failureMessage) {
+    const token = Symbol("move");
+    const moves = overlayRef.current[kind];
+    patches.forEach(({ id, patch }) => moves.set(id, { token, patch }));
+
+    write()
+      .catch((err) => showError(failureMessage, err))
+      .finally(() => {
+        // Success: server data now matches. Failure: Firestore has reverted, so the card snaps back.
+        patches.forEach(({ id }) => {
+          if (moves.get(id)?.token === token) moves.delete(id);
+        });
+        syncFromServer();
+      });
+  }
+
+  function handleDragStart({ active: dragged }) {
+    const type = dragged.data.current?.type;
+    draggingRef.current = true;
+    lastOverId.current = null;
+    originRef.current =
+      type === "card"
+        ? (cardsRef.current.find((c) => c.id === dragged.id)?.listId ?? null)
+        : null;
+    setActive({ id: dragged.id, type });
+  }
+
+  // Cards: move into the list being hovered, so the placeholder appears there.
+  function handleDragOver({ active: dragged, over }) {
+    if (!over || dragged.data.current?.type !== "card") return;
+
+    const cards = cardsRef.current;
+    const activeCard = cards.find((c) => c.id === dragged.id);
+    if (!activeCard) return;
+
+    const overIsList = over.data.current?.type === "list";
+    const overCard = overIsList ? null : cards.find((c) => c.id === over.id);
+    const targetListId = overIsList ? over.id : overCard?.listId;
+
+    // Same list: the sortable animation handles it, the order is applied on drop.
+    if (!targetListId || targetListId === activeCard.listId) return;
+
+    const without = cards.filter((c) => c.id !== dragged.id);
+    let insertAt = without.length; // empty list or list background: put it last
+    if (overCard) {
+      const overIndex = without.findIndex((c) => c.id === overCard.id);
+      const translated = dragged.rect.current.translated;
+      const draggedCenter = translated
+        ? translated.top + translated.height / 2
+        : 0;
+      const isBelow =
+        translated && draggedCenter > over.rect.top + over.rect.height / 2;
+      insertAt = overIndex + (isBelow ? 1 : 0);
+    }
+
+    const next = [
+      ...without.slice(0, insertAt),
+      { ...activeCard, listId: targetListId },
+      ...without.slice(insertAt),
+    ];
+    recentlyMovedRef.current = true;
+    cardsRef.current = next;
+    setLocalCards(next);
+  }
+
+  function commitListMove(activeId, overId) {
+    const lists = listsRef.current;
+    const from = lists.findIndex((l) => l.id === activeId);
+    const to = lists.findIndex((l) => l.id === overId);
+    if (from < 0 || to < 0 || from === to) return;
+
+    const ordered = arrayMove(lists, from, to);
+    const plan = planMove(ordered, to);
+    const patches = plan.updates.map((u) => ({
+      id: u.id,
+      patch: { position: u.position },
+    }));
+
+    persistMoves(
+      "lists",
+      patches,
+      () =>
+        plan.rebalanced
+          ? rebalanceLists(boardId, plan.updates)
+          : moveList(boardId, activeId, plan.updates[0].position),
+      "Could not move the list. It was put back.",
+    );
+  }
+
+  function commitCardMove(activeId, over) {
+    const cards = cardsRef.current;
+    const card = cards.find((c) => c.id === activeId);
+    if (!card) return;
+
+    // Same-list reorder: apply the order the sortable animation was showing.
+    let ordered = cards;
+    const overCard =
+      over.data.current?.type === "card"
+        ? cards.find((c) => c.id === over.id)
+        : null;
+    if (
+      overCard &&
+      overCard.id !== card.id &&
+      overCard.listId === card.listId
+    ) {
+      const from = cards.findIndex((c) => c.id === card.id);
+      const to = cards.findIndex((c) => c.id === overCard.id);
+      ordered = arrayMove(cards, from, to);
+    }
+
+    const listCards = ordered.filter((c) => c.listId === card.listId);
+    const index = listCards.findIndex((c) => c.id === card.id);
+    const prev = listCards[index - 1];
+    const next = listCards[index + 1];
+
+    // Dropped back in the same slot of the same list: nothing to write.
+    const stays =
+      originRef.current === card.listId &&
+      (!prev || (prev.position ?? 0) < (card.position ?? 0)) &&
+      (!next || (card.position ?? 0) < (next.position ?? 0));
+    if (stays) return;
+
+    const plan = planMove(listCards, index);
+    const patches = plan.updates.map((u) => ({
+      id: u.id,
+      patch: { listId: card.listId, position: u.position },
+    }));
+
+    persistMoves(
+      "cards",
+      patches,
+      () =>
+        plan.rebalanced
+          ? rebalanceCards(
+              boardId,
+              plan.updates.map((u) => ({
+                id: u.id,
+                listId: card.listId,
+                position: u.position,
+              })),
+            )
+          : moveCard(boardId, card.id, card.listId, plan.updates[0].position),
+      "Could not move the card. It was put back.",
+    );
+  }
+
+  function finishDrag() {
+    draggingRef.current = false;
+    setActive(null);
+    syncFromServer();
+  }
+
+  function handleDragEnd({ active: dragged, over }) {
+    const type = dragged.data.current?.type;
+    if (over) {
+      if (type === "list") commitListMove(dragged.id, over.id);
+      else if (type === "card") commitCardMove(dragged.id, over);
+    }
+    finishDrag();
+  }
+
+  // ----- Other actions -----
 
   function handleRenameBoard(title) {
     renameBoard(boardId, title).catch((err) =>
@@ -128,7 +415,7 @@ export default function BoardPage() {
   }
 
   function handleAddList(title) {
-    createList(boardId, title, nextPosition(lists)).catch((err) =>
+    createList(boardId, title, nextPosition(localLists)).catch((err) =>
       showError("Could not add the list.", err),
     );
     // Scroll to the new list once it has rendered.
@@ -157,7 +444,7 @@ export default function BoardPage() {
       user,
       list,
       cardsByList[list.id] || [],
-      nextPosition(lists),
+      nextPosition(localLists),
     )
       .then(() => showSuccess("List copied."))
       .catch((err) => showError("Could not copy the list.", err));
@@ -196,6 +483,11 @@ export default function BoardPage() {
   const style = board
     ? backgroundStyle(board.background)
     : { background: DEFAULT_BACKGROUND.value };
+
+  const activeCard =
+    active?.type === "card" ? localCards.find((c) => c.id === active.id) : null;
+  const activeList =
+    active?.type === "list" ? localLists.find((l) => l.id === active.id) : null;
 
   return (
     <div className="flex h-full flex-col" style={style}>
@@ -301,31 +593,67 @@ export default function BoardPage() {
             </div>
           </div>
         ) : (
-          <div className="flex h-full items-start gap-3 px-4 pb-4 pt-3">
-            {lists.length === 0 && (
-              <div className="w-72 shrink-0 rounded-2xl bg-white/20 p-4 text-white backdrop-blur">
-                <p className="font-semibold">This board is empty</p>
-                <p className="mt-1 text-sm text-white/80">
-                  Add your first list to start organizing your work.
-                </p>
-              </div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={collisionDetection}
+            measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+            autoScroll={{ threshold: { x: 0.12, y: 0.15 }, acceleration: 12 }}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragEnd={handleDragEnd}
+            onDragCancel={finishDrag}
+          >
+            <div className="flex h-full items-start gap-3 px-4 pb-4 pt-3">
+              {localLists.length === 0 && (
+                <div className="w-72 shrink-0 rounded-2xl bg-white/20 p-4 text-white backdrop-blur">
+                  <p className="font-semibold">This board is empty</p>
+                  <p className="mt-1 text-sm text-white/80">
+                    Add your first list to start organizing your work.
+                  </p>
+                </div>
+              )}
+
+              <SortableContext
+                items={listIds}
+                strategy={horizontalListSortingStrategy}
+              >
+                {localLists.map((list) => (
+                  <SortableList
+                    key={list.id}
+                    list={list}
+                    cards={cardsByList[list.id] || []}
+                    onRename={handleRenameList}
+                    onAddCard={handleAddCard}
+                    onCopy={handleCopyList}
+                    onArchive={handleArchiveList}
+                  />
+                ))}
+              </SortableContext>
+
+              <AddListComposer onAdd={handleAddList} />
+              <div className="w-1 shrink-0" aria-hidden="true" />
+            </div>
+
+            {createPortal(
+              <DragOverlay
+                dropAnimation={{
+                  duration: 220,
+                  easing: "cubic-bezier(0.2, 0, 0, 1)",
+                }}
+              >
+                {activeCard ? (
+                  <CardItem card={activeCard} isOverlay />
+                ) : activeList ? (
+                  <ListColumn
+                    list={activeList}
+                    cards={cardsByList[activeList.id] || []}
+                    isOverlay
+                  />
+                ) : null}
+              </DragOverlay>,
+              document.body,
             )}
-
-            {lists.map((list) => (
-              <ListColumn
-                key={list.id}
-                list={list}
-                cards={cardsByList[list.id] || []}
-                onRename={handleRenameList}
-                onAddCard={handleAddCard}
-                onCopy={handleCopyList}
-                onArchive={handleArchiveList}
-              />
-            ))}
-
-            <AddListComposer onAdd={handleAddList} />
-            <div className="w-1 shrink-0" aria-hidden="true" />
-          </div>
+          </DndContext>
         )}
       </div>
     </div>

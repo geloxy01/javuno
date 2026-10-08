@@ -34,3 +34,30 @@
       dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100;
   }
 }
+
+/* Drag overlay: the picked-up card or list eases into a slight tilt. */
+@keyframes drag-pickup {
+  from {
+    transform: rotate(0deg) scale(1);
+  }
+  to {
+    transform: rotate(3deg) scale(1.03);
+  }
+}
+
+@keyframes drag-pickup-list {
+  from {
+    transform: rotate(0deg) scale(1);
+  }
+  to {
+    transform: rotate(2deg) scale(1.01);
+  }
+}
+
+.drag-pickup {
+  animation: drag-pickup 160ms ease-out forwards;
+}
+
+.drag-pickup-list {
+  animation: drag-pickup-list 160ms ease-out forwards;
+}
