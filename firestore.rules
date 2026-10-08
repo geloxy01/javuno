@@ -48,6 +48,22 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.uid == resource.data.uid;
       allow delete: if false;
+
+      // Notifications: only the owner reads them. Other board members can send one,
+      // but only about a board that both of them belong to.
+      match /notifications/{notificationId} {
+        allow read: if signedIn() && request.auth.uid == userId;
+        allow create: if signedIn()
+          && request.resource.data.actorId == request.auth.uid
+          && request.resource.data.isRead == false
+          && request.resource.data.boardId is string
+          && request.auth.uid in boardData(request.resource.data.boardId).memberIds
+          && userId in boardData(request.resource.data.boardId).memberIds;
+        allow update: if signedIn()
+          && request.auth.uid == userId
+          && changedKeys().hasOnly(['isRead']);
+        allow delete: if signedIn() && request.auth.uid == userId;
+      }
     }
 
     // ---------- boards ----------

@@ -32,6 +32,7 @@ Firestore directly, and the Firestore security rules protect the data.
 - Search and filters (labels, members, due date); non-matching cards are dimmed
 - Keyboard shortcuts: `n` new card, `/` search, `Esc` close, `?` help
 - Dark mode (remembered in your browser) and a responsive layout
+- Floating bar: notifications, a month planner of due dates, and quick board switching
 
 ## Stack
 
@@ -161,6 +162,9 @@ Shortcuts are ignored while you type in a field.
 - **Background images are URL-only**, and some sites block hotlinking. There is no upload.
 - **No password reset, email verification or notifications** (for example, due-date reminders).
 - **No automated tests** for the app or the security rules.
+- **Notifications are created by the browser.** Any board member can send one to another member of
+  the same board, so a malicious member could spam others. There are no due-date reminders or
+  email/push notifications, and the bar is only on board pages.
 
 ## Troubleshooting
 

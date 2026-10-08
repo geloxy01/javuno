@@ -24,11 +24,13 @@ import BoardSkeleton from "../components/BoardSkeleton";
 import BoardToolbar from "../components/BoardToolbar";
 import CardItem from "../components/CardItem";
 import CardModal from "../components/CardModal";
+import FloatingBar from "../components/FloatingBar";
 import { HEADER_BUTTON } from "../components/HeaderPopover";
 import InlineEdit from "../components/InlineEdit";
 import ListColumn from "../components/ListColumn";
 import MembersPopover from "../components/MembersPanel";
 import Navbar from "../components/Navbar";
+import PlannerView from "../components/PlannerView";
 import ShortcutsDialog from "../components/ShortcutsDialog";
 import SortableList from "../components/SortableList";
 import ThemeToggle from "../components/ThemeToggle";
@@ -74,8 +76,14 @@ function withMove(item, moves) {
 export default function BoardPage() {
   const params = useParams();
   const boardId = params.boardId;
-  // The splat looks like "c/<cardId>" when a card is open, and is empty otherwise.
-  const openCardId = (params["*"] || "").match(/^c\/([^/]+)/)?.[1] ?? null;
+
+  // The splat is "", "planner", "c/<cardId>" or "planner/c/<cardId>".
+  const splat = params["*"] || "";
+  const view =
+    splat === "planner" || splat.startsWith("planner/") ? "planner" : "board";
+  const openCardId = splat.match(/^(?:planner\/)?c\/([^/]+)/)?.[1] ?? null;
+  const basePath =
+    view === "planner" ? `/b/${boardId}/planner` : `/b/${boardId}`;
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -263,16 +271,17 @@ export default function BoardPage() {
 
   // ----- Card modal navigation -----
 
+  // A card opens on top of whichever view you are in (board or planner).
   const openCard = useCallback(
-    (card) => navigate(`/b/${boardId}/c/${card.id}`),
-    [navigate, boardId],
+    (card) => navigate(`${basePath}/c/${card.id}`),
+    [navigate, basePath],
   );
 
   // If the modal was opened from the board, go back in history. If the page was opened on the card link, replace it.
   const closeCard = useCallback(() => {
     if (location.key !== "default") navigate(-1);
-    else navigate(`/b/${boardId}`, { replace: true });
-  }, [location.key, navigate, boardId]);
+    else navigate(basePath, { replace: true });
+  }, [location.key, navigate, basePath]);
 
   // ----- Keyboard shortcuts: n, /, ? (Esc is handled by each dialog) -----
 
@@ -308,6 +317,7 @@ export default function BoardPage() {
         searchRef.current?.focus();
         searchRef.current?.select();
       } else if (e.key === "n" || e.key === "N") {
+        if (view === "planner") return; // there are no lists to add to in the planner
         const lists = listsRef.current;
         if (lists.length === 0) {
           showError("Add a list first, then press n to add a card.");
@@ -322,7 +332,7 @@ export default function BoardPage() {
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [openCardId, helpOpen, showError]);
+  }, [openCardId, helpOpen, view, showError]);
 
   // ----- Drag and drop -----
 
@@ -667,6 +677,11 @@ export default function BoardPage() {
     ? (localCards.find((c) => c.id === openCardId) ?? null)
     : null;
 
+  const contentClass =
+    view === "planner"
+      ? "min-h-0 flex-1 overflow-y-auto"
+      : "min-h-0 flex-1 overflow-x-auto overflow-y-hidden";
+
   return (
     <div className="flex h-full flex-col" style={style}>
       {/* Translucent top bar */}
@@ -777,11 +792,8 @@ export default function BoardPage() {
         />
       )}
 
-      {/* Horizontally scrolling lists */}
-      <div
-        ref={scrollerRef}
-        className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden"
-      >
+      {/* Board (lists) or Planner (calendar) */}
+      <div ref={scrollerRef} className={contentClass}>
         {loading ? (
           <BoardSkeleton />
         ) : loadFailed ? (
@@ -796,6 +808,13 @@ export default function BoardPage() {
               </p>
             </div>
           </div>
+        ) : view === "planner" ? (
+          <PlannerView
+            cards={localCards}
+            lists={localLists}
+            matchIds={matchIds}
+            onOpenCard={openCard}
+          />
         ) : (
           <DndContext
             sensors={sensors}
@@ -807,7 +826,8 @@ export default function BoardPage() {
             onDragEnd={handleDragEnd}
             onDragCancel={finishDrag}
           >
-            <div className="flex h-full items-start gap-3 px-4 pb-4 pt-3">
+            {/* pb-20 leaves room for the floating bar */}
+            <div className="flex h-full items-start gap-3 px-4 pb-20 pt-3">
               {localLists.length === 0 && (
                 <div className="w-72 shrink-0 rounded-2xl bg-white/20 p-4 text-white backdrop-blur">
                   <p className="font-semibold">This board is empty</p>
@@ -874,10 +894,11 @@ export default function BoardPage() {
         )}
       </div>
 
-      {/* Card detail modal: /b/:boardId/c/:cardId */}
+      {/* Card detail modal: /b/:boardId/c/:cardId or /b/:boardId/planner/c/:cardId */}
       {openCardId && !loading && !loadFailed && (
         <CardModal
           boardId={boardId}
+          boardTitle={board?.title}
           card={openCardData}
           lists={localLists}
           labels={labels}
@@ -885,6 +906,8 @@ export default function BoardPage() {
           onClose={closeCard}
         />
       )}
+
+      {board && <FloatingBar boardId={boardId} view={view} user={user} />}
 
       <ShortcutsDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>

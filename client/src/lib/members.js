@@ -11,8 +11,9 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { auth, db } from "./firebase";
 import { commitUpdates } from "./batch";
+import { notifyAddedToBoard } from "./notifications";
 
 // Prefix search on the lowercase email. Needs at least 3 characters.
 export async function searchUsersByEmail(text) {
@@ -29,9 +30,9 @@ export async function searchUsersByEmail(text) {
   return snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
 }
 
-// Owner only (enforced by the rules).
-export function addMember(boardId, person) {
-  return updateDoc(doc(db, "boards", boardId), {
+// Owner only (enforced by the rules). The new member gets a notification.
+export async function addMember(boardId, person) {
+  await updateDoc(doc(db, "boards", boardId), {
     memberIds: arrayUnion(person.uid),
     [`members.${person.uid}`]: {
       role: "member",
@@ -41,6 +42,9 @@ export function addMember(boardId, person) {
     },
     updatedAt: serverTimestamp(),
   });
+
+  const actor = auth.currentUser;
+  if (actor) notifyAddedToBoard(boardId, actor, person);
 }
 
 // Used by the owner to remove someone, and by a member to leave.

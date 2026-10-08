@@ -20,6 +20,7 @@ import { logActivity } from "../lib/activity";
 import { deleteCard, updateCard } from "../lib/cards";
 import { DUE_TONES, getDueInfo } from "../lib/dates";
 import { newId } from "../lib/id";
+import { notifyCardAssigned } from "../lib/notifications";
 
 const sectionHeading =
   "text-sm font-semibold text-slate-700 dark:text-slate-200";
@@ -88,6 +89,7 @@ function TitleField({ value, onSave }) {
 
 export default function CardModal({
   boardId,
+  boardTitle,
   card,
   lists,
   labels,
@@ -188,10 +190,13 @@ export default function CardModal({
         memberIds: assigned ? arrayRemove(person.uid) : arrayUnion(person.uid),
       },
       "Could not update the members.",
-      () =>
+      () => {
         act(assigned ? "member_removed" : "member_added", {
           name: person.displayName,
-        }),
+        });
+        if (!assigned)
+          notifyCardAssigned(boardId, boardTitle, user, card, person);
+      },
     );
   }
 

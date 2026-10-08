@@ -11,6 +11,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { millis } from "./dates";
+import { notifyComment } from "./notifications";
 
 const commentsCol = (boardId) => collection(db, "boards", boardId, "comments");
 const cardRef = (boardId, cardId) =>
@@ -45,7 +46,9 @@ export function addComment(boardId, user, cardId, text) {
     commentCount: increment(1),
     updatedAt: serverTimestamp(),
   });
-  return batch.commit();
+  return batch.commit().then(() => {
+    notifyComment(boardId, user, cardId); // fire and forget
+  });
 }
 
 export function editComment(boardId, commentId, text) {
