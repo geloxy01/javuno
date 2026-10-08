@@ -18,6 +18,7 @@ import {
   horizontalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import AddListComposer from "../components/AddListComposer";
+import ArchivePopover from "../components/ArchivePanel";
 import BackgroundPopover from "../components/BackgroundPicker";
 import BoardSkeleton from "../components/BoardSkeleton";
 import BoardToolbar from "../components/BoardToolbar";
@@ -603,7 +604,11 @@ export default function BoardPage() {
 
   function handleArchiveList(list) {
     archiveList(boardId, list.id)
-      .then(() => showSuccess(`"${list.title}" was archived.`))
+      .then(() =>
+        showSuccess(
+          `"${list.title}" was archived. Find it under Archived items.`,
+        ),
+      )
       .catch((err) => showError("Could not archive the list.", err));
   }
 
@@ -723,6 +728,11 @@ export default function BoardPage() {
             <BackgroundPopover
               background={board.background}
               onChange={handleBackground}
+            />
+            <ArchivePopover
+              boardId={boardId}
+              lists={localLists}
+              cards={localCards}
             />
             <ThemeToggle className={HEADER_BUTTON} />
             <button

@@ -72,6 +72,8 @@ export function describeActivity(entry) {
       return `removed ${d.name || "a member"} from this card`;
     case "card_archived":
       return "archived this card";
+    case "card_restored":
+      return `restored this card from the archive${d.listName ? ` to ${d.listName}` : ""}`;
     default:
       return entry.type;
   }
