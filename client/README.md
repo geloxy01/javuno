@@ -33,6 +33,8 @@ Firestore directly, and the Firestore security rules protect the data.
 - Keyboard shortcuts: `n` new card, `/` search, `Esc` close, `?` help
 - Dark mode (remembered in your browser) and a responsive layout
 - Floating bar: notifications, a month planner of due dates, and quick board switching
+- Side-by-side Notifications, Planner and Board panels with resizable dividers; panel layout is remembered
+- Drag to schedule: drag a card from the board onto the planner to set its due date, or drag calendar chips to reschedule
 
 ## Stack
 
@@ -165,6 +167,9 @@ Shortcuts are ignored while you type in a field.
 - **Notifications are created by the browser.** Any board member can send one to another member of
   the same board, so a malicious member could spam others. There are no due-date reminders or
   email/push notifications, and the bar is only on board pages.
+- **The planner does not autoscroll while you drag a board card over it.** Use the mouse wheel to scroll it mid-drag.
+- **Old `/b/:id/planner` links** now open the board.
+- Drop times in Day and Week views snap to 15 minutes. In Month and Agenda views a card keeps its existing time, or 12:00 if it had none.
 
 ## Troubleshooting
 

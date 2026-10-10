@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Timestamp } from "firebase/firestore";
 import {
   DndContext,
   DragOverlay,
@@ -30,8 +31,11 @@ import InlineEdit from "../components/InlineEdit";
 import ListColumn from "../components/ListColumn";
 import MembersPopover from "../components/MembersPanel";
 import Navbar from "../components/Navbar";
-import PlannerView from "../components/PlannerView";
+import NotificationsPanel from "../components/NotificationsPanel";
+import PanelWorkspace from "../components/PanelWorkspace";
+import PlannerPanel from "../components/PlannerPanel";
 import ShortcutsDialog from "../components/ShortcutsDialog";
+import SidePanel from "../components/SidePanel";
 import SortableList from "../components/SortableList";
 import ThemeToggle from "../components/ThemeToggle";
 import { ArrowLeftIcon, StarIcon } from "../components/icons";
@@ -53,7 +57,9 @@ import {
   moveCard,
   rebalanceCards,
   subscribeToCards,
+  updateCard,
 } from "../lib/cards";
+import { toDate } from "../lib/dates";
 import { SmartMouseSensor, SmartTouchSensor } from "../lib/dndSensors";
 import { EMPTY_FILTERS, cardMatches, hasActiveFilter } from "../lib/filters";
 import { subscribeToLabels } from "../lib/labels";
@@ -67,28 +73,38 @@ import {
   subscribeToLists,
 } from "../lib/lists";
 import { nextPosition, planMove, sortByPosition } from "../lib/position";
+import useNotifications from "../lib/useNotifications";
+import usePanels from "../lib/usePanels";
+
+const PANEL_KEYS = { n: "notifications", p: "planner", b: "board" };
+const noop = () => {};
 
 function withMove(item, moves) {
   const move = moves.get(item.id);
   return move ? { ...item, ...move.patch } : item;
 }
 
+// Client position of a mouse, pointer or touch event.
+function pointOf(e) {
+  const t = e?.touches?.[0] || e?.changedTouches?.[0] || e;
+  return typeof t?.clientX === "number" ? { x: t.clientX, y: t.clientY } : null;
+}
+
 export default function BoardPage() {
   const params = useParams();
   const boardId = params.boardId;
 
-  // The splat is "", "planner", "c/<cardId>" or "planner/c/<cardId>".
+  // The splat is "" or "c/<cardId>". Old "/planner" links simply show the board.
   const splat = params["*"] || "";
-  const view =
-    splat === "planner" || splat.startsWith("planner/") ? "planner" : "board";
-  const openCardId = splat.match(/^(?:planner\/)?c\/([^/]+)/)?.[1] ?? null;
-  const basePath =
-    view === "planner" ? `/b/${boardId}/planner` : `/b/${boardId}`;
+  const openCardId = splat.match(/^c\/([^/]+)/)?.[1] ?? null;
+  const basePath = `/b/${boardId}`;
 
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useAuth();
   const { showError, showSuccess } = useToast();
+  const { visible, toggle, widths, setWidth, narrow } = usePanels();
+  const notifications = useNotifications(user.uid);
 
   const [board, setBoard] = useState(null);
   const [boardStatus, setBoardStatus] = useState("loading"); // 'loading' | 'ready' | 'denied'
@@ -98,7 +114,7 @@ export default function BoardPage() {
   const [listsReady, setListsReady] = useState(false);
   const [cardsReady, setCardsReady] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [active, setActive] = useState(null); // { id, type } while dragging
+  const [active, setActive] = useState(null); // { id, type, cardId } while dragging
 
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
@@ -114,6 +130,9 @@ export default function BoardPage() {
   const originRef = useRef(null); // list the dragged card started in
   const lastOverId = useRef(null);
   const recentlyMovedRef = useRef(false);
+  const pointerRef = useRef({ x: 0, y: 0 }); // last pointer position while dragging
+  const skipDropAnimation = useRef(false);
+  const gPendingRef = useRef(0); // time "g" was pressed, for g-then-n/p/b
   const listsRef = useRef([]);
   const cardsRef = useRef([]);
   listsRef.current = localLists;
@@ -224,6 +243,25 @@ export default function BoardPage() {
     return () => cancelAnimationFrame(id);
   }, [localCards]);
 
+  // While something is being dragged, remember where the pointer is.
+  // The planner uses it to turn "dropped here" into a time of day.
+  const dragging = active !== null;
+  useEffect(() => {
+    if (!dragging) return undefined;
+    function onMove(e) {
+      const point = pointOf(e);
+      if (point) pointerRef.current = point;
+    }
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("mousemove", onMove, { passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("mousemove", onMove);
+    };
+  }, [dragging]);
+
   // Group cards by list. Order inside a list is the array order.
   const cardsByList = useMemo(() => {
     const map = {};
@@ -271,19 +309,18 @@ export default function BoardPage() {
 
   // ----- Card modal navigation -----
 
-  // A card opens on top of whichever view you are in (board or planner).
   const openCard = useCallback(
     (card) => navigate(`${basePath}/c/${card.id}`),
     [navigate, basePath],
   );
 
-  // If the modal was opened from the board, go back in history. If the page was opened on the card link, replace it.
+  // If the modal was opened from the page, go back in history. If the page was opened on the card link, replace it.
   const closeCard = useCallback(() => {
     if (location.key !== "default") navigate(-1);
     else navigate(basePath, { replace: true });
   }, [location.key, navigate, basePath]);
 
-  // ----- Keyboard shortcuts: n, /, ? (Esc is handled by each dialog) -----
+  // ----- Keyboard shortcuts: n, /, ?, and g then n / p / b (Esc is handled by each dialog) -----
 
   const handleHoverList = useCallback((listId) => {
     hoverListRef.current = listId;
@@ -309,15 +346,29 @@ export default function BoardPage() {
         return;
       }
 
-      // The other shortcuts work on the board itself, not behind an open card or dialog.
+      // The other shortcuts work on the page itself, not behind an open card or dialog.
       if (openCardId || helpOpen) return;
 
-      if (e.key === "/") {
+      const key = e.key.toLowerCase();
+
+      // Second key of "g then ...".
+      if (gPendingRef.current && Date.now() - gPendingRef.current < 1500) {
+        gPendingRef.current = 0;
+        if (PANEL_KEYS[key]) {
+          e.preventDefault();
+          toggle(PANEL_KEYS[key]);
+          return;
+        }
+      }
+
+      if (key === "g") {
+        gPendingRef.current = Date.now();
+      } else if (e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
-      } else if (e.key === "n" || e.key === "N") {
-        if (view === "planner") return; // there are no lists to add to in the planner
+      } else if (key === "n") {
+        if (!visible.board) return; // no lists on screen to add to
         const lists = listsRef.current;
         if (lists.length === 0) {
           showError("Add a list first, then press n to add a card.");
@@ -332,14 +383,18 @@ export default function BoardPage() {
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [openCardId, helpOpen, view, showError]);
+  }, [openCardId, helpOpen, visible.board, toggle, showError]);
 
   // ----- Drag and drop -----
 
-  // Lists only collide with lists. Cards collide with the card under the pointer,
-  // or with the list itself when it is empty.
+  // Lists only collide with lists. Calendar chips only collide with calendar days.
+  // Cards collide with a calendar day when the pointer is over one, otherwise with
+  // the card under the pointer, or with the list itself when it is empty.
   const collisionDetection = useCallback((args) => {
-    if (args.active.data.current?.type === "list") {
+    const type = args.active.data.current?.type;
+    const isSlot = (c) => c.data.current?.type === "slot";
+
+    if (type === "list") {
       return closestCenter({
         ...args,
         droppableContainers: args.droppableContainers.filter(
@@ -348,20 +403,40 @@ export default function BoardPage() {
       });
     }
 
-    const pointerHits = pointerWithin(args);
-    const hits = pointerHits.length > 0 ? pointerHits : rectIntersection(args);
+    if (type === "chip") {
+      return pointerWithin({
+        ...args,
+        droppableContainers: args.droppableContainers.filter(isSlot),
+      }).slice(0, 1);
+    }
+
+    const slotHits = pointerWithin({
+      ...args,
+      droppableContainers: args.droppableContainers.filter(isSlot),
+    });
+    if (slotHits.length > 0) return slotHits.slice(0, 1);
+
+    const boardArgs = {
+      ...args,
+      droppableContainers: args.droppableContainers.filter((c) => !isSlot(c)),
+    };
+    const pointerHits = pointerWithin(boardArgs);
+    const hits =
+      pointerHits.length > 0 ? pointerHits : rectIntersection(boardArgs);
     let overId = getFirstCollision(hits, "id");
 
     if (overId != null) {
-      const container = args.droppableContainers.find((c) => c.id === overId);
+      const container = boardArgs.droppableContainers.find(
+        (c) => c.id === overId,
+      );
       if (container?.data.current?.type === "list") {
         const listCardIds = cardsRef.current
           .filter((c) => c.listId === overId)
           .map((c) => c.id);
         if (listCardIds.length > 0) {
           const closest = closestCenter({
-            ...args,
-            droppableContainers: args.droppableContainers.filter(
+            ...boardArgs,
+            droppableContainers: boardArgs.droppableContainers.filter(
               (c) => c.id !== overId && listCardIds.includes(c.id),
             ),
           });
@@ -394,15 +469,21 @@ export default function BoardPage() {
       });
   }
 
-  function handleDragStart({ active: dragged }) {
+  function handleDragStart({ active: dragged, activatorEvent }) {
     const type = dragged.data.current?.type;
     draggingRef.current = true;
     lastOverId.current = null;
+    skipDropAnimation.current = false;
+    pointerRef.current = pointOf(activatorEvent) || pointerRef.current;
     originRef.current =
       type === "card"
         ? (cardsRef.current.find((c) => c.id === dragged.id)?.listId ?? null)
         : null;
-    setActive({ id: dragged.id, type });
+    setActive({
+      id: dragged.id,
+      type,
+      cardId: dragged.data.current?.cardId ?? null,
+    });
   }
 
   // Cards: move into the list being hovered, so the placeholder appears there.
@@ -418,6 +499,7 @@ export default function BoardPage() {
     const targetListId = overIsList ? over.id : overCard?.listId;
 
     // Same list: the sortable animation handles it, the order is applied on drop.
+    // Over the calendar (no list or card): nothing to move yet.
     if (!targetListId || targetListId === activeCard.listId) return;
 
     const without = cards.filter((c) => c.id !== dragged.id);
@@ -541,6 +623,27 @@ export default function BoardPage() {
     );
   }
 
+  // Dropped on a calendar day: set the card's due date. Firestore shows the change at once
+  // and reverts it by itself if the write is rejected.
+  function scheduleFromDrop(cardId, over) {
+    const card =
+      serverRef.current.cards.find((c) => c.id === cardId) ||
+      cardsRef.current.find((c) => c.id === cardId);
+    const resolve = over.data.current?.resolve;
+    if (!card || typeof resolve !== "function") return false;
+
+    const date = resolve(pointerRef.current, card);
+    if (!date || Number.isNaN(date.getTime())) return false;
+
+    const current = toDate(card.dueDate);
+    if (current && current.getTime() === date.getTime()) return true; // same moment: nothing to write
+
+    updateCard(boardId, card.id, { dueDate: Timestamp.fromDate(date) }).catch(
+      (err) => showError("Could not set the due date.", err),
+    );
+    return true;
+  }
+
   function finishDrag() {
     draggingRef.current = false;
     setActive(null);
@@ -549,10 +652,21 @@ export default function BoardPage() {
 
   function handleDragEnd({ active: dragged, over }) {
     const type = dragged.data.current?.type;
+    let scheduled = false;
+
     if (over) {
-      if (type === "list") commitListMove(dragged.id, over.id);
-      else if (type === "card") commitCardMove(dragged.id, over);
+      if (type === "list") {
+        commitListMove(dragged.id, over.id);
+      } else if (over.data.current?.type === "slot") {
+        const cardId =
+          type === "chip" ? dragged.data.current.cardId : dragged.id;
+        scheduled = scheduleFromDrop(cardId, over);
+      } else if (type === "card") {
+        commitCardMove(dragged.id, over);
+      }
     }
+
+    skipDropAnimation.current = scheduled; // the card just appears on the calendar, no fly-back
     finishDrag();
   }
 
@@ -673,14 +787,114 @@ export default function BoardPage() {
     active?.type === "card" ? localCards.find((c) => c.id === active.id) : null;
   const activeList =
     active?.type === "list" ? localLists.find((l) => l.id === active.id) : null;
+  const activeChip =
+    active?.type === "chip"
+      ? localCards.find((c) => c.id === active.cardId)
+      : null;
   const openCardData = openCardId
     ? (localCards.find((c) => c.id === openCardId) ?? null)
     : null;
 
-  const contentClass =
-    view === "planner"
-      ? "min-h-0 flex-1 overflow-y-auto"
-      : "min-h-0 flex-1 overflow-x-auto overflow-y-hidden";
+  // A panel can be closed with its own X as long as another one stays open.
+  const openCount = Object.values(visible).filter(Boolean).length;
+  const closable = !narrow && openCount > 1;
+  const plannerStatus = loading ? "loading" : loadFailed ? "error" : "ready";
+
+  const notificationsPanel = (
+    <SidePanel
+      title={
+        <>
+          Notifications
+          {notifications.unread > 0 && (
+            <span className="rounded-full bg-red-500 px-1.5 text-[11px] font-bold text-white">
+              {notifications.unread}
+            </span>
+          )}
+        </>
+      }
+      onClose={closable ? () => toggle("notifications") : undefined}
+    >
+      <NotificationsPanel
+        uid={user.uid}
+        items={notifications.items}
+        error={notifications.error}
+        close={noop}
+      />
+    </SidePanel>
+  );
+
+  const plannerPanel = (
+    <PlannerPanel
+      cards={localCards}
+      lists={localLists}
+      matchIds={matchIds}
+      status={plannerStatus}
+      boardVisible={visible.board}
+      onOpenCard={openCard}
+      onClose={closable ? () => toggle("planner") : undefined}
+    />
+  );
+
+  const boardPanel = (
+    <div
+      ref={scrollerRef}
+      className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden"
+    >
+      {loading ? (
+        <BoardSkeleton />
+      ) : loadFailed ? (
+        <div className="px-4 pt-6">
+          <div className="max-w-md rounded-2xl bg-white/90 p-5 shadow-soft dark:bg-slate-800/90">
+            <h2 className="font-semibold">
+              Couldn't load this board's content
+            </h2>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              Check your Firestore rules and your connection, then reload the
+              page.
+            </p>
+          </div>
+        </div>
+      ) : (
+        // pb-20 leaves room for the floating bar
+        <div className="flex h-full items-start gap-3 px-3 pb-20 pt-3">
+          {localLists.length === 0 && (
+            <div className="w-72 shrink-0 rounded-2xl bg-white/20 p-4 text-white backdrop-blur">
+              <p className="font-semibold">This board is empty</p>
+              <p className="mt-1 text-sm text-white/80">
+                Add your first list to start organizing your work.
+              </p>
+            </div>
+          )}
+
+          <SortableContext
+            items={listIds}
+            strategy={horizontalListSortingStrategy}
+          >
+            {localLists.map((list) => (
+              <SortableList
+                key={list.id}
+                list={list}
+                cards={cardsByList[list.id] || []}
+                labelsById={labelsById}
+                membersById={membersById}
+                matchIds={matchIds}
+                composeRequest={composeRequest}
+                onHoverList={handleHoverList}
+                onRename={handleRenameList}
+                onAddCard={handleAddCard}
+                onCopy={handleCopyList}
+                onArchive={handleArchiveList}
+                onOpenCard={openCard}
+              />
+            ))}
+          </SortableContext>
+
+          <AddListComposer onAdd={handleAddList} />
+          <div className="w-1 shrink-0" aria-hidden="true" />
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex h-full flex-col" style={style}>
@@ -792,109 +1006,63 @@ export default function BoardPage() {
         />
       )}
 
-      {/* Board (lists) or Planner (calendar) */}
-      <div ref={scrollerRef} className={contentClass}>
-        {loading ? (
-          <BoardSkeleton />
-        ) : loadFailed ? (
-          <div className="px-4 pt-6">
-            <div className="max-w-md rounded-2xl bg-white/90 p-5 shadow-soft dark:bg-slate-800/90">
-              <h2 className="font-semibold">
-                Couldn't load this board's content
-              </h2>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Check your Firestore rules and your connection, then reload the
-                page.
-              </p>
-            </div>
-          </div>
-        ) : view === "planner" ? (
-          <PlannerView
-            cards={localCards}
-            lists={localLists}
-            matchIds={matchIds}
-            onOpenCard={openCard}
-          />
-        ) : (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={collisionDetection}
-            measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
-            autoScroll={{ threshold: { x: 0.12, y: 0.15 }, acceleration: 12 }}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDragEnd={handleDragEnd}
-            onDragCancel={finishDrag}
+      {/* One drag context for all panels, so a card can be dragged from the board onto the planner */}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={collisionDetection}
+        measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+        autoScroll={{ threshold: { x: 0.12, y: 0.15 }, acceleration: 12 }}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDragEnd={handleDragEnd}
+        onDragCancel={finishDrag}
+      >
+        <PanelWorkspace
+          visible={visible}
+          widths={widths}
+          narrow={narrow}
+          onResize={setWidth}
+          panels={{
+            notifications: notificationsPanel,
+            planner: plannerPanel,
+            board: boardPanel,
+          }}
+        />
+
+        {createPortal(
+          <DragOverlay
+            dropAnimation={
+              skipDropAnimation.current
+                ? null
+                : { duration: 220, easing: "cubic-bezier(0.2, 0, 0, 1)" }
+            }
           >
-            {/* pb-20 leaves room for the floating bar */}
-            <div className="flex h-full items-start gap-3 px-4 pb-20 pt-3">
-              {localLists.length === 0 && (
-                <div className="w-72 shrink-0 rounded-2xl bg-white/20 p-4 text-white backdrop-blur">
-                  <p className="font-semibold">This board is empty</p>
-                  <p className="mt-1 text-sm text-white/80">
-                    Add your first list to start organizing your work.
-                  </p>
-                </div>
-              )}
-
-              <SortableContext
-                items={listIds}
-                strategy={horizontalListSortingStrategy}
-              >
-                {localLists.map((list) => (
-                  <SortableList
-                    key={list.id}
-                    list={list}
-                    cards={cardsByList[list.id] || []}
-                    labelsById={labelsById}
-                    membersById={membersById}
-                    matchIds={matchIds}
-                    composeRequest={composeRequest}
-                    onHoverList={handleHoverList}
-                    onRename={handleRenameList}
-                    onAddCard={handleAddCard}
-                    onCopy={handleCopyList}
-                    onArchive={handleArchiveList}
-                    onOpenCard={openCard}
-                  />
-                ))}
-              </SortableContext>
-
-              <AddListComposer onAdd={handleAddList} />
-              <div className="w-1 shrink-0" aria-hidden="true" />
-            </div>
-
-            {createPortal(
-              <DragOverlay
-                dropAnimation={{
-                  duration: 220,
-                  easing: "cubic-bezier(0.2, 0, 0, 1)",
-                }}
-              >
-                {activeCard ? (
-                  <CardItem
-                    card={activeCard}
-                    labelsById={labelsById}
-                    membersById={membersById}
-                    isOverlay
-                  />
-                ) : activeList ? (
-                  <ListColumn
-                    list={activeList}
-                    cards={cardsByList[activeList.id] || []}
-                    labelsById={labelsById}
-                    membersById={membersById}
-                    isOverlay
-                  />
-                ) : null}
-              </DragOverlay>,
-              document.body,
-            )}
-          </DndContext>
+            {activeCard ? (
+              <CardItem
+                card={activeCard}
+                labelsById={labelsById}
+                membersById={membersById}
+                isOverlay
+              />
+            ) : activeList ? (
+              <ListColumn
+                list={activeList}
+                cards={cardsByList[activeList.id] || []}
+                labelsById={labelsById}
+                membersById={membersById}
+                isOverlay
+              />
+            ) : activeChip ? (
+              <div className="drag-pickup max-w-[14rem] cursor-grabbing truncate rounded-md bg-javuno-light px-2 py-1 text-xs font-medium text-javuno-dark shadow-xl ring-1 ring-javuno/50 dark:bg-javuno/40 dark:text-white">
+                {activeChip.title}
+              </div>
+            ) : null}
+          </DragOverlay>,
+          document.body,
         )}
-      </div>
+      </DndContext>
 
-      {/* Card detail modal: /b/:boardId/c/:cardId or /b/:boardId/planner/c/:cardId */}
+      {/* Card detail modal: /b/:boardId/c/:cardId */}
       {openCardId && !loading && !loadFailed && (
         <CardModal
           boardId={boardId}
@@ -907,7 +1075,15 @@ export default function BoardPage() {
         />
       )}
 
-      {board && <FloatingBar boardId={boardId} view={view} user={user} />}
+      {board && (
+        <FloatingBar
+          boardId={boardId}
+          user={user}
+          visible={visible}
+          onToggle={toggle}
+          unread={notifications.unread}
+        />
+      )}
 
       <ShortcutsDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>

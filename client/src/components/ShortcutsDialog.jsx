@@ -8,6 +8,13 @@ const SHORTCUTS = [
   },
   { keys: ["/"], text: "Search cards" },
   {
+    keys: ["g", "n"],
+    sequence: true,
+    text: "Show or hide the Notifications panel",
+  },
+  { keys: ["g", "p"], sequence: true, text: "Show or hide the Planner panel" },
+  { keys: ["g", "b"], sequence: true, text: "Show or hide the Board panel" },
+  {
     keys: ["Esc"],
     text: "Close a dialog, popover or card, and clear the search",
   },
@@ -54,14 +61,16 @@ export default function ShortcutsDialog({ open, onClose }) {
         <ul className="space-y-3">
           {SHORTCUTS.map((s) => (
             <li key={s.keys.join("+")} className="flex items-start gap-3">
-              <span className="flex w-14 shrink-0 gap-1">
-                {s.keys.map((k) => (
-                  <kbd
-                    key={k}
-                    className="rounded-md border border-slate-300 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700 shadow-sm dark:border-slate-600 dark:bg-slate-700 dark:text-slate-100"
-                  >
-                    {k}
-                  </kbd>
+              <span className="flex w-24 shrink-0 items-center gap-1">
+                {s.keys.map((k, i) => (
+                  <span key={k} className="flex items-center gap-1">
+                    {i > 0 && (
+                      <span className="text-xs text-slate-400">then</span>
+                    )}
+                    <kbd className="rounded-md border border-slate-300 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700 shadow-sm dark:border-slate-600 dark:bg-slate-700 dark:text-slate-100">
+                      {k}
+                    </kbd>
+                  </span>
                 ))}
               </span>
               <span className="text-sm text-slate-600 dark:text-slate-300">
@@ -73,7 +82,8 @@ export default function ShortcutsDialog({ open, onClose }) {
 
         <p className="mt-4 text-xs text-slate-400">
           Shortcuts are ignored while you are typing in a field. Drag cards and
-          lists with the mouse, or press and hold on a touch screen.
+          lists with the mouse, or press and hold on a touch screen. Drag a card
+          onto the Planner to give it a due date.
         </p>
       </div>
     </div>
