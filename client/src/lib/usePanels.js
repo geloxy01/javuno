@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const PANELS_KEY = "javuno-panels";
+const PANELS_KEY = "javuno-panels-v2";
 const WIDTHS_KEY = "javuno-panel-widths";
 const NARROW_QUERY = "(max-width: 767px)";
 
